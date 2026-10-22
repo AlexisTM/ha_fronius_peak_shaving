@@ -1,0 +1,86 @@
+input_number:
+  fronius_peak_shaving_power:
+    name: Fronius peak shaving power
+    min: 250
+    max: 2420
+    step: 10
+    unit_of_measurement: W
+    mode: box
+
+shell_command:
+  fronius_battery_set: >-
+    python3 /config/scripts/fronius_battery.py set '{{ payload | to_json }}'
+
+command_line:
+  - sensor:
+      name: Fronius battery config
+      unique_id: fronius_battery_config
+      command: python3 /config/scripts/fronius_battery.py get
+      command_timeout: 30
+      scan_interval: 60
+      value_template: "{{ value_json.HYB_EM_MODE }}"
+      json_attributes:
+        - HYB_EM_MODE
+        - HYB_EM_POWER
+
+template:
+  - switch:
+      - name: Fronius peak shaving
+        unique_id: fronius_peak_shaving
+        availability: "{{ state_attr('sensor.fronius_battery_config', 'HYB_EM_MODE') is not none }}"
+        state: "{{ state_attr('sensor.fronius_battery_config', 'HYB_EM_MODE') == 1 }}"
+        turn_on:
+          - action: script.fronius_battery_apply
+            data:
+              payload:
+                HYB_EM_MODE: 1
+                HYB_EM_POWER: "{{ states('input_number.fronius_peak_shaving_power') | int }}"
+        turn_off:
+          - action: script.fronius_battery_apply
+            data:
+              payload:
+                HYB_EM_MODE: 0
+  - sensor:
+      - name: Fronius peak shaving power setpoint
+        unique_id: fronius_peak_shaving_power_setpoint
+        unit_of_measurement: W
+        device_class: power
+        state: "{{ state_attr('sensor.fronius_battery_config', 'HYB_EM_POWER') }}"
+        availability: "{{ state_attr('sensor.fronius_battery_config', 'HYB_EM_POWER') is not none }}"
+
+script:
+  fronius_battery_apply:
+    alias: Fronius battery apply
+    mode: queued
+    fields:
+      payload:
+        description: Fields to POST to /api/config/batteries
+    sequence:
+      - action: shell_command.fronius_battery_set
+        data:
+          payload: "{{ payload }}"
+        response_variable: result
+      - action: homeassistant.update_entity
+        target:
+          entity_id: sensor.fronius_battery_config
+      - if: "{{ result.returncode != 0 }}"
+        then:
+          - stop: "Fronius rejected the request: {{ result.stdout }}"
+            error: true
+
+automation:
+  - id: fronius_peak_shaving_push_power
+    alias: Fronius peak shaving push power
+    mode: restart
+    triggers:
+      - trigger: state
+        entity_id: input_number.fronius_peak_shaving_power
+    conditions:
+      - condition: state
+        entity_id: switch.fronius_peak_shaving
+        state: "on"
+    actions:
+      - action: script.fronius_battery_apply
+        data:
+          payload:
+            HYB_EM_POWER: "{{ trigger.to_state.state | int }}"
